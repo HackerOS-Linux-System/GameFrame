@@ -1,3 +1,4 @@
 // gcc
 
 > cd source-code
+> gcc -o gameframe main.c $(pkg-config --cflags --libs wlroots wayland-server xkbcommon libdrm)
