@@ -9,8 +9,10 @@
  * It supports basic input and output handling suitable for
  * legacy hardware.
  *
- * Build with: pkg-config --cflags --libs wlroots wayland-server xkbcommon libdrm
- * gcc -o gameframe gameframe.c `pkg-config --cflags --libs wlroots wayland-server xkbcommon libdrm`
+ * Now with XWayland support added.
+ *
+ * Build with: pkg-config --cflags --libs wlroots-0.18 wayland-server xkbcommon libdrm xcb
+ * gcc -o gameframe gameframe.c `pkg-config --cflags --libs wlroots-0.18 wayland-server xkbcommon libdrm xcb`
  *
  * Run with: ./gameframe /path/to/your/app
  */
@@ -36,8 +38,9 @@
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_xdg_shell.h>
-#include <wlr/util/log.h>
 #include <wlr/types/wlr_cursor.h>
+#include <wlr/xwayland.h>
+#include <wlr/util/log.h>
 
 struct gameframe_server {
     struct wl_display *display;
@@ -47,6 +50,7 @@ struct gameframe_server {
     struct wlr_scene *scene;
     struct wlr_scene_output *scene_output;
     struct wlr_xdg_shell *xdg_shell;
+    struct wlr_xwayland *xwayland;
     struct wlr_compositor *compositor;
     struct wlr_subcompositor *subcompositor;
     struct wlr_output_layout *output_layout;
@@ -54,6 +58,7 @@ struct gameframe_server {
     struct wlr_cursor *cursor;
     struct wl_listener new_output;
     struct wl_listener new_xdg_surface;
+    struct wl_listener new_xwayland_surface;
     struct wl_listener new_input;
     struct wl_listener request_set_cursor;
     struct wl_listener request_set_selection;
@@ -76,6 +81,17 @@ struct gameframe_view {
     struct wl_listener request_resize;
     struct wl_listener request_maximize;
     struct wl_listener request_fullscreen;
+};
+struct gameframe_xwl_view {
+    struct wlr_xwayland_surface *xwl_surface;
+    struct wlr_scene_tree *scene_tree;
+    struct gameframe_server *server;
+    struct wl_listener map;
+    struct wl_listener unmap;
+    struct wl_listener destroy;
+    struct wl_listener request_configure;
+    struct wl_listener request_fullscreen;
+    struct wl_listener request_activate;
 };
 static void output_frame(struct wl_listener *listener, void *data) {
     struct gameframe_output *output = wl_container_of(listener, output, frame);
@@ -125,7 +141,7 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
     struct gameframe_view *view = wl_container_of(listener, view, unmap);
     // No-op for now
 }
-static void view_destroy(struct wl_listener *listener, void *data) {
+static void xdg_view_destroy(struct wl_listener *listener, void *data) {
     struct gameframe_view *view = wl_container_of(listener, view, destroy);
     wl_list_remove(&view->map.link);
     wl_list_remove(&view->unmap.link);
@@ -147,8 +163,7 @@ static void xdg_toplevel_request_maximize(struct wl_listener *listener, void *da
 }
 static void xdg_toplevel_request_fullscreen(struct wl_listener *listener, void *data) {
     struct gameframe_view *view = wl_container_of(listener, view, request_fullscreen);
-    struct wlr_xdg_surface *xdg_surface = data;
-    wlr_xdg_toplevel_set_fullscreen(view->xdg_toplevel, xdg_surface->toplevel->requested.fullscreen);
+    wlr_xdg_toplevel_set_fullscreen(view->xdg_toplevel, view->xdg_toplevel->requested.fullscreen);
 }
 static void server_new_xdg_surface(struct wl_listener *listener, void *data) {
     struct gameframe_server *server = wl_container_of(listener, server, new_xdg_surface);
@@ -164,7 +179,7 @@ static void server_new_xdg_surface(struct wl_listener *listener, void *data) {
     wl_signal_add(&xdg_surface->surface->events.map, &view->map);
     view->unmap.notify = xdg_toplevel_unmap;
     wl_signal_add(&xdg_surface->surface->events.unmap, &view->unmap);
-    view->destroy.notify = view_destroy;
+    view->destroy.notify = xdg_view_destroy;
     wl_signal_add(&xdg_surface->events.destroy, &view->destroy);
     view->request_move.notify = xdg_toplevel_request_move;
     wl_signal_add(&view->xdg_toplevel->events.request_move, &view->request_move);
@@ -175,6 +190,66 @@ static void server_new_xdg_surface(struct wl_listener *listener, void *data) {
     view->request_fullscreen.notify = xdg_toplevel_request_fullscreen;
     wl_signal_add(&view->xdg_toplevel->events.request_fullscreen, &view->request_fullscreen);
 }
+static void xwl_map(struct wl_listener *listener, void *data) {
+    struct gameframe_xwl_view *view = wl_container_of(listener, view, map);
+    wlr_scene_node_set_position(&view->scene_tree->node, 0, 0);
+    int width, height;
+    wlr_output_effective_resolution(view->server->scene_output->output, &width, &height);
+    wlr_xwayland_surface_configure(view->xwl_surface, 0, 0, width, height);
+    wlr_xwayland_surface_activate(view->xwl_surface, true);
+    wlr_xwayland_surface_set_fullscreen(view->xwl_surface, true);
+}
+static void xwl_unmap(struct wl_listener *listener, void *data) {
+    // No-op
+}
+static void xwl_destroy(struct wl_listener *listener, void *data) {
+    struct gameframe_xwl_view *view = wl_container_of(listener, view, destroy);
+    wl_list_remove(&view->map.link);
+    wl_list_remove(&view->unmap.link);
+    wl_list_remove(&view->destroy.link);
+    wl_list_remove(&view->request_configure.link);
+    wl_list_remove(&view->request_fullscreen.link);
+    wl_list_remove(&view->request_activate.link);
+    free(view);
+}
+static void xwl_request_configure(struct wl_listener *listener, void *data) {
+    struct gameframe_xwl_view *view = wl_container_of(listener, view, request_configure);
+    struct wlr_xwayland_surface_configure_event *event = data;
+    int width, height;
+    wlr_output_effective_resolution(view->server->scene_output->output, &width, &height);
+    wlr_xwayland_surface_configure(view->xwl_surface, 0, 0, width, height);
+}
+static void xwl_request_fullscreen(struct wl_listener *listener, void *data) {
+    struct gameframe_xwl_view *view = wl_container_of(listener, view, request_fullscreen);
+    wlr_xwayland_surface_set_fullscreen(view->xwl_surface, true);
+}
+static void xwl_request_activate(struct wl_listener *listener, void *data) {
+    struct gameframe_xwl_view *view = wl_container_of(listener, view, request_activate);
+    wlr_xwayland_surface_activate(view->xwl_surface, true);
+}
+static void server_new_xwayland_surface(struct wl_listener *listener, void *data) {
+    struct gameframe_server *server = wl_container_of(listener, server, new_xwayland_surface);
+    struct wlr_xwayland_surface *xwl_surface = data;
+    if (xwl_surface->override_redirect) {
+        return; // Ignore override-redirect windows for simplicity
+    }
+    struct gameframe_xwl_view *view = calloc(1, sizeof(*view));
+    view->server = server;
+    view->xwl_surface = xwl_surface;
+    view->scene_tree = wlr_scene_xwayland_surface_create(&server->scene->tree, xwl_surface);
+    view->map.notify = xwl_map;
+    wl_signal_add(&xwl_surface->events.map, &view->map);
+    view->unmap.notify = xwl_unmap;
+    wl_signal_add(&xwl_surface->events.unmap, &view->unmap);
+    view->destroy.notify = xwl_destroy;
+    wl_signal_add(&xwl_surface->events.destroy, &view->destroy);
+    view->request_configure.notify = xwl_request_configure;
+    wl_signal_add(&xwl_surface->events.request_configure, &view->request_configure);
+    view->request_fullscreen.notify = xwl_request_fullscreen;
+    wl_signal_add(&xwl_surface->events.request_fullscreen, &view->request_fullscreen);
+    view->request_activate.notify = xwl_request_activate;
+    wl_signal_add(&xwl_surface->events.request_activate, &view->request_activate);
+}
 static void process_keyboard(struct gameframe_server *server, struct wlr_keyboard *keyboard) {
     wlr_seat_set_keyboard(server->seat, keyboard);
     wlr_keyboard_set_repeat_info(keyboard, 25, 600);
@@ -183,22 +258,22 @@ static void server_new_input(struct wl_listener *listener, void *data) {
     struct gameframe_server *server = wl_container_of(listener, server, new_input);
     struct wlr_input_device *device = data;
     switch (device->type) {
-    case WLR_INPUT_DEVICE_KEYBOARD: {
-        struct wlr_keyboard *kb = wlr_keyboard_from_input_device(device);
-        struct xkb_context *context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
-        struct xkb_keymap *keymap = xkb_keymap_new_from_names(context, NULL, XKB_KEYMAP_COMPILE_NO_FLAGS);
-        wlr_keyboard_set_keymap(kb, keymap);
-        xkb_keymap_unref(keymap);
-        xkb_context_unref(context);
-        process_keyboard(server, kb);
-        break;
-    }
-    case WLR_INPUT_DEVICE_POINTER: {
-        wlr_cursor_attach_input_device(server->cursor, device);
-        break;
-    }
-    default:
-        break;
+        case WLR_INPUT_DEVICE_KEYBOARD: {
+            struct wlr_keyboard *kb = wlr_keyboard_from_input_device(device);
+            struct xkb_context *context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+            struct xkb_keymap *keymap = xkb_keymap_new_from_names(context, NULL, XKB_KEYMAP_COMPILE_NO_FLAGS);
+            wlr_keyboard_set_keymap(kb, keymap);
+            xkb_keymap_unref(keymap);
+            xkb_context_unref(context);
+            process_keyboard(server, kb);
+            break;
+        }
+        case WLR_INPUT_DEVICE_POINTER: {
+            wlr_cursor_attach_input_device(server->cursor, device);
+            break;
+        }
+        default:
+            break;
     }
     uint32_t caps = WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD;
     wlr_seat_set_capabilities(server->seat, caps);
@@ -246,6 +321,7 @@ int main(int argc, char *argv[]) {
     }
     server.compositor = wlr_compositor_create(server.display, 5, server.renderer);
     server.subcompositor = wlr_subcompositor_create(server.display);
+    server.xwayland = wlr_xwayland_create(server.display, server.compositor, true);
     wlr_data_device_manager_create(server.display);
     server.output_layout = wlr_output_layout_create(server.display);
     server.cursor = wlr_cursor_create();
@@ -256,7 +332,10 @@ int main(int argc, char *argv[]) {
     server.xdg_shell = wlr_xdg_shell_create(server.display, 3);
     server.new_xdg_surface.notify = server_new_xdg_surface;
     wl_signal_add(&server.xdg_shell->events.new_surface, &server.new_xdg_surface);
+    server.new_xwayland_surface.notify = server_new_xwayland_surface;
+    wl_signal_add(&server.xwayland->events.new_surface, &server.new_xwayland_surface);
     server.seat = wlr_seat_create(server.display, "seat0");
+    wlr_xwayland_set_seat(server.xwayland, server.seat);
     server.request_set_cursor.notify = request_set_cursor;
     wl_signal_add(&server.seat->events.request_set_cursor, &server.request_set_cursor);
     server.request_set_selection.notify = request_set_selection;
@@ -273,6 +352,9 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     setenv("WAYLAND_DISPLAY", socket, true);
+    if (server.xwayland) {
+        setenv("DISPLAY", server.xwayland->display_name, true);
+    }
     server.child_pid = fork();
     if (server.child_pid == 0) {
         execvp(argv[1], argv + 1);
@@ -295,5 +377,6 @@ int main(int argc, char *argv[]) {
     wlr_allocator_destroy(server.allocator);
     wlr_renderer_destroy(server.renderer);
     wlr_backend_destroy(server.backend);
+    wlr_xwayland_destroy(server.xwayland);
     return 0;
 }
