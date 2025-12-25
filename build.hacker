@@ -1,4 +1,7 @@
 // gcc
 
 > cd source-code
-> gcc -o gameframe main.c $(pkg-config --cflags --libs wlroots wayland-server xkbcommon libdrm)
+> sudo mkdir protocols
+> wayland-scanner client-header /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml protocols/xdg-shell-protocol.h
+> sudo wayland-scanner client-header /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell-protocol.h
+> gcc -DWLR_USE_UNSTABLE -Iprotocols -o gameframe main.c $(pkg-config --cflags --libs wlroots-0.18 wayland-server xkbcommon libdrm)
