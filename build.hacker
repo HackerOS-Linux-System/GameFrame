@@ -1,7 +1,18 @@
 // gcc
+// meson 
+// ninja-build
+// libwlroots-dev
+// libwayland-dev
+// libxkbcommon-dev
+// libgles2-mesa-dev 
+// libegl1-mesa-dev
+// libgbm-dev
+// libdrm-dev
+// libinput-dev 
+// libpixman-1-dev
+// libudev-dev 
+// pkg-config
 
 > cd source-code
-> sudo mkdir protocols
-> wayland-scanner client-header /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml protocols/xdg-shell-protocol.h
-> sudo wayland-scanner client-header /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell-protocol.h
-> gcc -DWLR_USE_UNSTABLE -Iprotocols -o gameframe main.c $(pkg-config --cflags --libs wlroots-0.18 wayland-server xkbcommon libdrm)
+> meson setup build
+> ninja -C build
