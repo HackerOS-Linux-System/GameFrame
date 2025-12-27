@@ -1,382 +1,571 @@
-/*
- * GameFrame: A minimalist Wayland compositor inspired by Cage,
- * optimized for older GPUs. It uses wlroots and focuses on
- * basic functionality without relying on modern GPU features
- * like advanced shaders or high-performance rendering.
- *
- * This compositor creates a single fullscreen output and runs
- * a specified command (e.g., a terminal or game) inside it.
- * It supports basic input and output handling suitable for
- * legacy hardware.
- *
- * Now with XWayland support added.
- *
- * Build with: pkg-config --cflags --libs wlroots-0.18 wayland-server xkbcommon libdrm xcb
- * gcc -o gameframe gameframe.c `pkg-config --cflags --libs wlroots-0.18 wayland-server xkbcommon libdrm xcb`
- *
- * Run with: ./gameframe /path/to/your/app
- */
-#include <assert.h>
+#include <ctype.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <getopt.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
-#include <wlr/render/allocator.h>
+#include <wlr/backend/headless.h>
+#include <wlr/backend/multi.h>
+#include <wlr/backend/session.h>
+#include <wlr/config.h>
+#include <wlr/render/gles2.h>
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_data_device.h>
+#include <wlr/types/wlr_gamma_control_v1.h>
+#include <wlr/types/wlr_idle.h>
+#include <wlr/types/wlr_idle_inhibit_v1.h>
 #include <wlr/types/wlr_input_device.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_output_layout.h>
-#include <wlr/types/wlr_pointer.h>
+#include <wlr/types/wlr_output_manager_v1.h>
+#include <wlr/types/wlr_presentation.h>
+#include <wlr/types/wlr_primary_selection.h>
+#include <wlr/types/wlr_relative_pointer_v1.h>
 #include <wlr/types/wlr_scene.h>
-#include <wlr/types/wlr_seat.h>
+#include <wlr/types/wlr_screencopy_v1.h>
+#include <wlr/types/wlr_server_decoration.h>
 #include <wlr/types/wlr_subcompositor.h>
+#include <wlr/types/wlr_tablet_v2.h>
+#include <wlr/types/wlr_virtual_keyboard_v1.h>
+#include <wlr/types/wlr_virtual_pointer_v1.h>
+#include <wlr/types/wlr_xcursor_manager.h>
+#include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
-#include <wlr/types/wlr_cursor.h>
-#include <wlr/xwayland.h>
+#include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/util/log.h>
+#include <wlr/util/region.h>
 
-struct gameframe_server {
-    struct wl_display *display;
-    struct wlr_backend *backend;
-    struct wlr_renderer *renderer;
-    struct wlr_allocator *allocator;
-    struct wlr_scene *scene;
-    struct wlr_scene_output *scene_output;
-    struct wlr_xdg_shell *xdg_shell;
-    struct wlr_xwayland *xwayland;
-    struct wlr_compositor *compositor;
-    struct wlr_subcompositor *subcompositor;
-    struct wlr_output_layout *output_layout;
-    struct wlr_seat *seat;
-    struct wlr_cursor *cursor;
-    struct wl_listener new_output;
-    struct wl_listener new_xdg_surface;
-    struct wl_listener new_xwayland_surface;
-    struct wl_listener new_input;
-    struct wl_listener request_set_cursor;
-    struct wl_listener request_set_selection;
-    pid_t child_pid;
-};
-struct gameframe_output {
-    struct wlr_output *wlr_output;
-    struct gameframe_server *server;
-    struct wl_listener frame;
-    struct wl_listener destroy;
-};
-struct gameframe_view {
-    struct wlr_xdg_toplevel *xdg_toplevel;
-    struct wlr_scene_tree *scene_tree;
-    struct gameframe_server *server;
-    struct wl_listener map;
-    struct wl_listener unmap;
-    struct wl_listener destroy;
-    struct wl_listener request_move;
-    struct wl_listener request_resize;
-    struct wl_listener request_maximize;
-    struct wl_listener request_fullscreen;
-};
-struct gameframe_xwl_view {
-    struct wlr_xwayland_surface *xwl_surface;
-    struct wlr_scene_tree *scene_tree;
-    struct gameframe_server *server;
-    struct wl_listener map;
-    struct wl_listener unmap;
-    struct wl_listener destroy;
-    struct wl_listener request_configure;
-    struct wl_listener request_fullscreen;
-    struct wl_listener request_activate;
-};
-static void output_frame(struct wl_listener *listener, void *data) {
-    struct gameframe_output *output = wl_container_of(listener, output, frame);
-    struct wlr_scene *scene = output->server->scene;
-    struct wlr_scene_output *scene_output = wlr_scene_get_scene_output(scene, output->wlr_output);
-    wlr_scene_output_commit(scene_output, NULL);
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    wlr_scene_output_send_frame_done(scene_output, &now);
+#include "idle_inhibit_v1.h"
+#include "output.h"
+#include "seat.h"
+#include "server.h"
+#include "view.h"
+#include "xdg_shell.h"
+#if GAMEFRAME_HAS_XWAYLAND
+#include "xwayland.h"
+#endif
+
+void
+server_terminate(struct gf_server *server)
+{
+	// Workaround for https://gitlab.freedesktop.org/wayland/wayland/-/merge_requests/421
+	if (server->terminated) {
+		return;
+	}
+
+	wl_display_terminate(server->wl_display);
 }
-static void output_destroy(struct wl_listener *listener, void *data) {
-    struct gameframe_output *output = wl_container_of(listener, output, destroy);
-    wl_list_remove(&output->frame.link);
-    wl_list_remove(&output->destroy.link);
-    free(output);
+
+static void
+handle_display_destroy(struct wl_listener *listener, void *data)
+{
+	struct gf_server *server = wl_container_of(listener, server, display_destroy);
+	server->terminated = true;
 }
-static void server_new_output(struct wl_listener *listener, void *data) {
-    struct gameframe_server *server = wl_container_of(listener, server, new_output);
-    struct wlr_output *wlr_output = data;
-    wlr_output_init_render(wlr_output, server->allocator, server->renderer);
-    struct wlr_output_state state;
-    wlr_output_state_init(&state);
-    wlr_output_state_set_enabled(&state, true);
-    struct wlr_output_mode *mode = wlr_output_preferred_mode(wlr_output);
-    if (mode != NULL) {
-        wlr_output_state_set_mode(&state, mode);
-    }
-    wlr_output_commit_state(wlr_output, &state);
-    wlr_output_state_finish(&state);
-    struct gameframe_output *output = calloc(1, sizeof(*output));
-    output->wlr_output = wlr_output;
-    output->server = server;
-    output->frame.notify = output_frame;
-    wl_signal_add(&wlr_output->events.frame, &output->frame);
-    output->destroy.notify = output_destroy;
-    wl_signal_add(&wlr_output->events.destroy, &output->destroy);
-    wlr_output_layout_add_auto(server->output_layout, wlr_output);
-    server->scene_output = wlr_scene_output_create(server->scene, wlr_output);
+
+static int
+sigchld_handler(int fd, uint32_t mask, void *data)
+{
+	struct gf_server *server = data;
+
+	/* Close Gameframe's read pipe. */
+	close(fd);
+
+	if (mask & WL_EVENT_HANGUP) {
+		wlr_log(WLR_DEBUG, "Child process closed normally");
+	} else if (mask & WL_EVENT_ERROR) {
+		wlr_log(WLR_DEBUG, "Connection closed by server");
+	}
+
+	server->return_app_code = true;
+	server_terminate(server);
+	return 0;
 }
-static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
-    struct gameframe_view *view = wl_container_of(listener, view, map);
-    wlr_scene_node_set_position(&view->scene_tree->node, 0, 0);
-    wlr_xdg_toplevel_set_size(view->xdg_toplevel, 0, 0); // Fullscreen implicitly
-    wlr_xdg_toplevel_set_fullscreen(view->xdg_toplevel, true);
+
+static bool
+set_cloexec(int fd)
+{
+	int flags = fcntl(fd, F_GETFD);
+
+	if (flags == -1) {
+		wlr_log(WLR_ERROR, "Unable to set the CLOEXEC flag: fnctl failed");
+		return false;
+	}
+
+	flags = flags | FD_CLOEXEC;
+	if (fcntl(fd, F_SETFD, flags) == -1) {
+		wlr_log(WLR_ERROR, "Unable to set the CLOEXEC flag: fnctl failed");
+		return false;
+	}
+
+	return true;
 }
-static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
-    struct gameframe_view *view = wl_container_of(listener, view, unmap);
-    // No-op for now
+
+static bool
+spawn_primary_client(struct gf_server *server, char *argv[], pid_t *pid_out, struct wl_event_source **sigchld_source)
+{
+	int fd[2];
+	if (pipe(fd) != 0) {
+		wlr_log(WLR_ERROR, "Unable to create pipe");
+		return false;
+	}
+
+	pid_t pid = fork();
+	if (pid == 0) {
+		sigset_t set;
+		sigemptyset(&set);
+		sigprocmask(SIG_SETMASK, &set, NULL);
+		/* Close read, we only need write in the primary client process. */
+		close(fd[0]);
+		execvp(argv[0], argv);
+		/* execvp() returns only on failure */
+		wlr_log_errno(WLR_ERROR, "Failed to spawn client");
+		_exit(1);
+	} else if (pid == -1) {
+		wlr_log_errno(WLR_ERROR, "Unable to fork");
+		return false;
+	}
+
+	/* Set this early so that if we fail, the client process will be cleaned up properly. */
+	*pid_out = pid;
+
+	if (!set_cloexec(fd[0]) || !set_cloexec(fd[1])) {
+		return false;
+	}
+
+	/* Close write, we only need read in Gameframe. */
+	close(fd[1]);
+
+	struct wl_event_loop *event_loop = wl_display_get_event_loop(server->wl_display);
+	uint32_t mask = WL_EVENT_HANGUP | WL_EVENT_ERROR;
+	*sigchld_source = wl_event_loop_add_fd(event_loop, fd[0], mask, sigchld_handler, server);
+
+	wlr_log(WLR_DEBUG, "Child process created with pid %d", pid);
+	return true;
 }
-static void xdg_view_destroy(struct wl_listener *listener, void *data) {
-    struct gameframe_view *view = wl_container_of(listener, view, destroy);
-    wl_list_remove(&view->map.link);
-    wl_list_remove(&view->unmap.link);
-    wl_list_remove(&view->destroy.link);
-    wl_list_remove(&view->request_move.link);
-    wl_list_remove(&view->request_resize.link);
-    wl_list_remove(&view->request_maximize.link);
-    wl_list_remove(&view->request_fullscreen.link);
-    free(view);
+
+static int
+cleanup_primary_client(pid_t pid)
+{
+	int status;
+
+	waitpid(pid, &status, 0);
+
+	if (WIFEXITED(status)) {
+		wlr_log(WLR_DEBUG, "Child exited normally with exit status %d", WEXITSTATUS(status));
+		return WEXITSTATUS(status);
+	} else if (WIFSIGNALED(status)) {
+		/* Mimic Bash and other shells for the exit status */
+		wlr_log(WLR_DEBUG, "Child was terminated by a signal (%d)", WTERMSIG(status));
+		return 128 + WTERMSIG(status);
+	}
+
+	return 0;
 }
-static void xdg_toplevel_request_move(struct wl_listener *listener, void *data) {
-    // No moving in fullscreen
+
+static bool
+drop_permissions(void)
+{
+	if (getuid() == 0 || getgid() == 0) {
+		wlr_log(WLR_INFO, "Running as root user, this is dangerous");
+		return true;
+	}
+	if (getuid() != geteuid() || getgid() != getegid()) {
+		wlr_log(WLR_INFO, "setuid/setgid bit detected, dropping permissions");
+		// Set the gid and uid in the correct order.
+		if (setgid(getgid()) != 0 || setuid(getuid()) != 0) {
+			wlr_log(WLR_ERROR, "Unable to drop root, refusing to start");
+			return false;
+		}
+	}
+
+	if (setgid(0) != -1 || setuid(0) != -1) {
+		wlr_log(WLR_ERROR, "Unable to drop root (we shouldn't be able to restore it after setuid), refusing to start");
+		return false;
+	}
+
+	return true;
 }
-static void xdg_toplevel_request_resize(struct wl_listener *listener, void *data) {
-    // No resizing in fullscreen
+
+static int
+handle_signal(int signal, void *data)
+{
+	struct gf_server *server = data;
+
+	switch (signal) {
+	case SIGINT:
+		/* Fallthrough */
+	case SIGTERM:
+		server_terminate(server);
+		return 0;
+	default:
+		return 0;
+	}
 }
-static void xdg_toplevel_request_maximize(struct wl_listener *listener, void *data) {
-    // Already maximized/fullscreen
+
+static void
+usage(FILE *file, const char *gameframe)
+{
+	fprintf(file,
+		"Usage: %s [OPTIONS] [--] [APPLICATION...]\n"
+		"\n"
+		" -d\t Don't draw client side decorations, when possible\n"
+		" -D\t Enable debug logging\n"
+		" -h\t Display this help message\n"
+		" -m extend Extend the display across all connected outputs (default)\n"
+		" -m last Use only the last connected output\n"
+		" -s\t Allow VT switching\n"
+		" -v\t Show the version number and exit\n"
+		" -W <width>\t Set the resolution used by gameframe (output resolution)\n"
+		" -H <height>\t Set the resolution used by gameframe (output resolution)\n"
+		" -w <width>\t Set the resolution used by the game (inner resolution)\n"
+		" -h <height>\t Set the resolution used by the game (inner resolution)\n"
+		" -r <fps>\t Set frame-rate limit for the game when focused\n"
+		" -o <fps>\t Set frame-rate limit for the game when unfocused\n"
+		" -F fsr\t Use AMD FSR upscaling (parsed but uses basic scaling on older GPUs)\n"
+		" -F nis\t Use NVIDIA NIS upscaling (parsed but uses basic scaling on older GPUs)\n"
+		" -S integer\t Use integer scaling\n"
+		" -S stretch\t Use stretch scaling\n"
+		" -b\t Create a border-less window\n"
+		" -f\t Create a full-screen window\n"
+		" --reshade-effect [path]\t Specify a Reshade effect file (parsed but not implemented)\n"
+		" --reshade-technique-idx [idx]\t Specify Reshade technique index (parsed but not implemented)\n"
+		"\n"
+		" Use -- when you want to pass arguments to APPLICATION\n",
+		gameframe);
 }
-static void xdg_toplevel_request_fullscreen(struct wl_listener *listener, void *data) {
-    struct gameframe_view *view = wl_container_of(listener, view, request_fullscreen);
-    wlr_xdg_toplevel_set_fullscreen(view->xdg_toplevel, view->xdg_toplevel->requested.fullscreen);
+
+static bool
+parse_args(struct gf_server *server, int argc, char *argv[])
+{
+	int c;
+	char *upscale_method = NULL;
+	char *scaling_method = NULL;
+	char *reshade_path = NULL;
+	int reshade_idx = -1;
+
+	static struct option long_options[] = {
+		{"reshade-effect", required_argument, 0, 0},
+		{"reshade-technique-idx", required_argument, 0, 0},
+		{0, 0, 0, 0}
+	};
+
+	int option_index = 0;
+	while ((c = getopt_long(argc, argv, "dDhm:svo:r:w:h:W:H:F:S:bf", long_options, &option_index)) != -1) {
+		switch (c) {
+		case 0:
+			if (strcmp(long_options[option_index].name, "reshade-effect") == 0) {
+				reshade_path = optarg;
+				wlr_log(WLR_INFO, "Reshade effect parsed but not implemented on older GPUs");
+			} else if (strcmp(long_options[option_index].name, "reshade-technique-idx") == 0) {
+				reshade_idx = atoi(optarg);
+				wlr_log(WLR_INFO, "Reshade index parsed but not implemented on older GPUs");
+			}
+			break;
+		case 'd':
+			server->xdg_decoration = true;
+			break;
+		case 'D':
+			server->log_level = WLR_DEBUG;
+			break;
+		case 'h':
+			usage(stdout, argv[0]);
+			return false;
+		case 'm':
+			if (strcmp(optarg, "last") == 0) {
+				server->output_mode = GAMEFRAME_MULTI_OUTPUT_MODE_LAST;
+			} else if (strcmp(optarg, "extend") == 0) {
+				server->output_mode = GAMEFRAME_MULTI_OUTPUT_MODE_EXTEND;
+			}
+			break;
+		case 's':
+			server->allow_vt_switch = true;
+			break;
+		case 'v':
+			fprintf(stdout, "Gameframe version " GAMEFRAME_VERSION "\n");
+			exit(0);
+		case 'W':
+			server->nested_width = atoi(optarg);
+			break;
+		case 'H':
+			server->nested_height = atoi(optarg);
+			break;
+		case 'w':
+			server->game_width = atoi(optarg);
+			break;
+		case 'h':
+			server->game_height = atoi(optarg);
+			break;
+		case 'r':
+			server->fps_focused = atoi(optarg);
+			break;
+		case 'o':
+			server->fps_unfocused = atoi(optarg);
+			break;
+		case 'F':
+			upscale_method = optarg;
+			wlr_log(WLR_INFO, "Upscaling method %s parsed, using basic scaling on older GPUs", optarg);
+			break;
+		case 'S':
+			scaling_method = optarg;
+			wlr_log(WLR_INFO, "Scaling method %s parsed", optarg);
+			break;
+		case 'b':
+			server->borderless = true;
+			break;
+		case 'f':
+			server->fullscreen = true;
+			break;
+		default:
+			usage(stderr, argv[0]);
+			return false;
+		}
+	}
+
+	return true;
 }
-static void server_new_xdg_surface(struct wl_listener *listener, void *data) {
-    struct gameframe_server *server = wl_container_of(listener, server, new_xdg_surface);
-    struct wlr_xdg_surface *xdg_surface = data;
-    if (xdg_surface->role != WLR_XDG_SURFACE_ROLE_TOPLEVEL) {
-        return;
-    }
-    struct gameframe_view *view = calloc(1, sizeof(*view));
-    view->server = server;
-    view->xdg_toplevel = xdg_surface->toplevel;
-    view->scene_tree = wlr_scene_xdg_surface_create(&server->scene->tree, xdg_surface);
-    view->map.notify = xdg_toplevel_map;
-    wl_signal_add(&xdg_surface->surface->events.map, &view->map);
-    view->unmap.notify = xdg_toplevel_unmap;
-    wl_signal_add(&xdg_surface->surface->events.unmap, &view->unmap);
-    view->destroy.notify = xdg_view_destroy;
-    wl_signal_add(&xdg_surface->events.destroy, &view->destroy);
-    view->request_move.notify = xdg_toplevel_request_move;
-    wl_signal_add(&view->xdg_toplevel->events.request_move, &view->request_move);
-    view->request_resize.notify = xdg_toplevel_request_resize;
-    wl_signal_add(&view->xdg_toplevel->events.request_resize, &view->request_resize);
-    view->request_maximize.notify = xdg_toplevel_request_maximize;
-    wl_signal_add(&view->xdg_toplevel->events.request_maximize, &view->request_maximize);
-    view->request_fullscreen.notify = xdg_toplevel_request_fullscreen;
-    wl_signal_add(&view->xdg_toplevel->events.request_fullscreen, &view->request_fullscreen);
+
+int
+main(int argc, char *argv[])
+{
+	struct gf_server server = {.log_level = WLR_INFO};
+	struct wl_event_source *sigchld_source = NULL;
+	pid_t pid = 0;
+	int ret = 0, app_ret = 0;
+
+#ifdef DEBUG
+	server.log_level = WLR_DEBUG;
+#endif
+
+	server.nested_width = 1280;
+	server.nested_height = 720;
+	server.game_width = 1280;
+	server.game_height = 720;
+	server.fps_focused = 0; // Unlimited
+	server.fps_unfocused = 0;
+	server.borderless = false;
+	server.fullscreen = false;
+
+	if (!parse_args(&server, argc, argv)) {
+		return 1;
+	}
+
+	wlr_log_init(server.log_level, NULL);
+
+	/* Wayland requires XDG_RUNTIME_DIR to be set. */
+	if (!getenv("XDG_RUNTIME_DIR")) {
+		wlr_log(WLR_ERROR, "XDG_RUNTIME_DIR is not set in the environment");
+		return 1;
+	}
+
+	server.wl_display = wl_display_create();
+	if (!server.wl_display) {
+		wlr_log(WLR_ERROR, "Cannot allocate a Wayland display");
+		return 1;
+	}
+
+	server.display_destroy.notify = handle_display_destroy;
+	wl_display_add_destroy_listener(server.wl_display, &server.display_destroy);
+
+	struct wl_event_loop *event_loop = wl_display_get_event_loop(server.wl_display);
+	struct wl_event_source *sigint_source = wl_event_loop_add_signal(event_loop, SIGINT, handle_signal, &server);
+	struct wl_event_source *sigterm_source = wl_event_loop_add_signal(event_loop, SIGTERM, handle_signal, &server);
+
+	server.backend = wlr_backend_autocreate(event_loop, &server.session);
+	if (!server.backend) {
+		wlr_log(WLR_ERROR, "Unable to create the wlroots backend");
+		ret = 1;
+		goto end;
+	}
+
+	if (!drop_permissions()) {
+		ret = 1;
+		goto end;
+	}
+
+	server.renderer = wlr_gles2_renderer_create(server.backend);
+	if (!server.renderer) {
+		wlr_log(WLR_ERROR, "Unable to create GLES2 renderer for older GPUs, falling back");
+		server.renderer = wlr_renderer_autocreate(server.backend);
+		if (!server.renderer) {
+			wlr_log(WLR_ERROR, "Unable to create the wlroots renderer");
+			ret = 1;
+			goto end;
+		}
+	}
+
+	server.allocator = wlr_allocator_autocreate(server.backend, server.renderer);
+	if (!server.allocator) {
+		wlr_log(WLR_ERROR, "Unable to create the wlroots allocator");
+		ret = 1;
+		goto end;
+	}
+
+	wlr_renderer_init_wl_display(server.renderer, server.wl_display);
+
+	wl_list_init(&server.views);
+	wl_list_init(&server.outputs);
+
+	server.output_layout = wlr_output_layout_create(server.wl_display);
+	if (!server.output_layout) {
+		wlr_log(WLR_ERROR, "Unable to create output layout");
+		ret = 1;
+		goto end;
+	}
+	server.output_layout_change.notify = handle_output_layout_change;
+	wl_signal_add(&server.output_layout->events.change, &server.output_layout_change);
+
+	server.scene = wlr_scene_create();
+	if (!server.scene) {
+		wlr_log(WLR_ERROR, "Unable to create scene");
+		ret = 1;
+		goto end;
+	}
+
+	server.scene_output_layout = wlr_scene_attach_output_layout(server.scene, server.output_layout);
+
+	struct wlr_compositor *compositor = wlr_compositor_create(server.wl_display, 6, server.renderer);
+	if (!compositor) {
+		wlr_log(WLR_ERROR, "Unable to create the wlroots compositor");
+		ret = 1;
+		goto end;
+	}
+
+	if (!wlr_subcompositor_create(server.wl_display)) {
+		wlr_log(WLR_ERROR, "Unable to create the wlroots subcompositor");
+		ret = 1;
+		goto end;
+	}
+
+	if (!wlr_data_device_manager_create(server.wl_display)) {
+		wlr_log(WLR_ERROR, "Unable to create the data device manager");
+		ret = 1;
+		goto end;
+	}
+
+	if (!wlr_primary_selection_v1_device_manager_create(server.wl_display)) {
+		wlr_log(WLR_ERROR, "Unable to create primary selection device manager");
+		ret = 1;
+		goto end;
+	}
+
+	/* Configure a listener to be notified when new outputs are
+	 * available on the backend. We use this only to detect the
+	 * first output and ignore subsequent outputs. */
+	server.new_output.notify = handle_new_output;
+	wl_signal_add(&server.backend->events.new_output, &server.new_output);
+
+	server.seat = seat_create(&server, server.backend);
+	if (!server.seat) {
+		wlr_log(WLR_ERROR, "Unable to create the seat");
+		ret = 1;
+		goto end;
+	}
+
+	server.idle = wlr_idle_notifier_v1_create(server.wl_display);
+
+	server.idle_inhibit_v1 = wlr_idle_inhibit_v1_create(server.wl_display);
+	server.new_idle_inhibitor_v1.notify = handle_idle_inhibitor_v1_new;
+	wl_signal_add(&server.idle_inhibit_v1->events.new_inhibitor, &server.new_idle_inhibitor_v1);
+
+	server.xdg_shell = wlr_xdg_shell_create(server.wl_display, 6);
+	server.new_xdg_toplevel.notify = handle_new_xdg_toplevel;
+	wl_signal_add(&server.xdg_shell->events.new_toplevel, &server.new_xdg_toplevel);
+	server.new_xdg_popup.notify = handle_new_xdg_popup;
+	wl_signal_add(&server.xdg_shell->events.new_popup, &server.new_xdg_popup);
+
+	server.xdg_decoration_manager = wlr_xdg_decoration_manager_v1_create(server.wl_display);
+	server.new_xdg_decoration.notify = handle_xdg_toplevel_decoration;
+	wl_signal_add(&server.xdg_decoration_manager->events.new_toplevel_decoration, &server.new_xdg_decoration);
+
+#if GAMEFRAME_HAS_XWAYLAND
+	server.xwayland = wlr_xwayland_create(server.wl_display, compositor, true);
+	server.new_xwayland_surface.notify = handle_new_xwayland_surface;
+	wl_signal_add(&server.xwayland->events.new_surface, &server.new_xwayland_surface);
+	setenv("DISPLAY", server.xwayland->display_name, true);
+#endif
+
+	server.output_manager_v1 = wlr_output_manager_v1_create(server.wl_display);
+	server.output_manager_apply.notify = handle_output_manager_apply;
+	wl_signal_add(&server.output_manager_v1->events.apply, &server.output_manager_apply);
+	server.output_manager_test.notify = handle_output_manager_test;
+	wl_signal_add(&server.output_manager_v1->events.test, &server.output_manager_test);
+
+	server.relative_pointer_manager = wlr_relative_pointer_manager_v1_create(server.wl_display);
+
+	server.foreign_toplevel_manager = wlr_foreign_toplevel_manager_v1_create(server.wl_display);
+
+	const char *socket = wl_display_add_socket_auto(server.wl_display);
+	if (!socket) {
+		wlr_backend_destroy(server.backend);
+		return 1;
+	}
+	setenv("WAYLAND_DISPLAY", socket, true);
+	wlr_log(WLR_INFO, "Running Wayland compositor on WAYLAND_DISPLAY=%s", socket);
+
+	if (!wlr_backend_start(server.backend)) {
+		wlr_backend_destroy(server.backend);
+		wl_display_destroy(server.wl_display);
+		return 1;
+	}
+
+	if (optind < argc) {
+		if (!spawn_primary_client(&server, &argv[optind], &pid, &sigchld_source)) {
+			ret = 1;
+			goto end;
+		}
+	} else {
+		wlr_log(WLR_ERROR, "No application specified, exiting");
+		ret = 1;
+		goto end;
+	}
+
+	wl_display_run(server.wl_display);
+
+	if (server.return_app_code) {
+		app_ret = cleanup_primary_client(pid);
+	}
+
+end:
+
+wl_display_destroy_clients(server.wl_display);
+
+wlr_scene_output_layout_destroy(server.scene_output_layout);
+
+wlr_scene_destroy(server.scene);
+
+wlr_output_layout_destroy(server.output_layout);
+
+wlr_allocator_destroy(server.allocator);
+
+wlr_renderer_destroy(server.renderer);
+
+wlr_backend_destroy(server.backend);
+
+wl_display_destroy(server.wl_display);
+
+wl_event_source_remove(sigint_source);
+
+wl_event_source_remove(sigterm_source);
+
+if (sigchld_source) {
+	wl_event_source_remove(sigchld_source);
 }
-static void xwl_map(struct wl_listener *listener, void *data) {
-    struct gameframe_xwl_view *view = wl_container_of(listener, view, map);
-    wlr_scene_node_set_position(&view->scene_tree->node, 0, 0);
-    int width, height;
-    wlr_output_effective_resolution(view->server->scene_output->output, &width, &height);
-    wlr_xwayland_surface_configure(view->xwl_surface, 0, 0, width, height);
-    wlr_xwayland_surface_activate(view->xwl_surface, true);
-    wlr_xwayland_surface_set_fullscreen(view->xwl_surface, true);
-}
-static void xwl_unmap(struct wl_listener *listener, void *data) {
-    // No-op
-}
-static void xwl_destroy(struct wl_listener *listener, void *data) {
-    struct gameframe_xwl_view *view = wl_container_of(listener, view, destroy);
-    wl_list_remove(&view->map.link);
-    wl_list_remove(&view->unmap.link);
-    wl_list_remove(&view->destroy.link);
-    wl_list_remove(&view->request_configure.link);
-    wl_list_remove(&view->request_fullscreen.link);
-    wl_list_remove(&view->request_activate.link);
-    free(view);
-}
-static void xwl_request_configure(struct wl_listener *listener, void *data) {
-    struct gameframe_xwl_view *view = wl_container_of(listener, view, request_configure);
-    struct wlr_xwayland_surface_configure_event *event = data;
-    int width, height;
-    wlr_output_effective_resolution(view->server->scene_output->output, &width, &height);
-    wlr_xwayland_surface_configure(view->xwl_surface, 0, 0, width, height);
-}
-static void xwl_request_fullscreen(struct wl_listener *listener, void *data) {
-    struct gameframe_xwl_view *view = wl_container_of(listener, view, request_fullscreen);
-    wlr_xwayland_surface_set_fullscreen(view->xwl_surface, true);
-}
-static void xwl_request_activate(struct wl_listener *listener, void *data) {
-    struct gameframe_xwl_view *view = wl_container_of(listener, view, request_activate);
-    wlr_xwayland_surface_activate(view->xwl_surface, true);
-}
-static void server_new_xwayland_surface(struct wl_listener *listener, void *data) {
-    struct gameframe_server *server = wl_container_of(listener, server, new_xwayland_surface);
-    struct wlr_xwayland_surface *xwl_surface = data;
-    if (xwl_surface->override_redirect) {
-        return; // Ignore override-redirect windows for simplicity
-    }
-    struct gameframe_xwl_view *view = calloc(1, sizeof(*view));
-    view->server = server;
-    view->xwl_surface = xwl_surface;
-    view->scene_tree = wlr_scene_xwayland_surface_create(&server->scene->tree, xwl_surface);
-    view->map.notify = xwl_map;
-    wl_signal_add(&xwl_surface->events.map, &view->map);
-    view->unmap.notify = xwl_unmap;
-    wl_signal_add(&xwl_surface->events.unmap, &view->unmap);
-    view->destroy.notify = xwl_destroy;
-    wl_signal_add(&xwl_surface->events.destroy, &view->destroy);
-    view->request_configure.notify = xwl_request_configure;
-    wl_signal_add(&xwl_surface->events.request_configure, &view->request_configure);
-    view->request_fullscreen.notify = xwl_request_fullscreen;
-    wl_signal_add(&xwl_surface->events.request_fullscreen, &view->request_fullscreen);
-    view->request_activate.notify = xwl_request_activate;
-    wl_signal_add(&xwl_surface->events.request_activate, &view->request_activate);
-}
-static void process_keyboard(struct gameframe_server *server, struct wlr_keyboard *keyboard) {
-    wlr_seat_set_keyboard(server->seat, keyboard);
-    wlr_keyboard_set_repeat_info(keyboard, 25, 600);
-}
-static void server_new_input(struct wl_listener *listener, void *data) {
-    struct gameframe_server *server = wl_container_of(listener, server, new_input);
-    struct wlr_input_device *device = data;
-    switch (device->type) {
-        case WLR_INPUT_DEVICE_KEYBOARD: {
-            struct wlr_keyboard *kb = wlr_keyboard_from_input_device(device);
-            struct xkb_context *context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
-            struct xkb_keymap *keymap = xkb_keymap_new_from_names(context, NULL, XKB_KEYMAP_COMPILE_NO_FLAGS);
-            wlr_keyboard_set_keymap(kb, keymap);
-            xkb_keymap_unref(keymap);
-            xkb_context_unref(context);
-            process_keyboard(server, kb);
-            break;
-        }
-        case WLR_INPUT_DEVICE_POINTER: {
-            wlr_cursor_attach_input_device(server->cursor, device);
-            break;
-        }
-        default:
-            break;
-    }
-    uint32_t caps = WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD;
-    wlr_seat_set_capabilities(server->seat, caps);
-}
-static void request_set_cursor(struct wl_listener *listener, void *data) {
-    struct gameframe_server *server = wl_container_of(listener, server, request_set_cursor);
-    struct wlr_seat_pointer_request_set_cursor_event *event = data;
-    struct wlr_seat_client *focused_client = server->seat->pointer_state.focused_client;
-    if (focused_client != NULL && focused_client == event->seat_client) {
-        wlr_cursor_set_surface(server->cursor, event->surface, event->hotspot_x, event->hotspot_y);
-    }
-}
-static void request_set_selection(struct wl_listener *listener, void *data) {
-    struct gameframe_server *server = wl_container_of(listener, server, request_set_selection);
-    struct wlr_seat_request_set_selection_event *event = data;
-    wlr_seat_set_selection(server->seat, event->source, event->serial);
-}
-int main(int argc, char *argv[]) {
-    wlr_log_init(WLR_DEBUG, NULL);
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s <command>\n", argv[0]);
-        return 1;
-    }
-    struct gameframe_server server = {0};
-    server.display = wl_display_create();
-    if (server.display == NULL) {
-        wlr_log(WLR_ERROR, "Cannot create wayland display");
-        return 1;
-    }
-    server.backend = wlr_backend_autocreate(wl_display_get_event_loop(server.display), NULL);
-    if (server.backend == NULL) {
-        wlr_log(WLR_ERROR, "Cannot create backend");
-        return 1;
-    }
-    server.renderer = wlr_renderer_autocreate(server.backend);
-    if (server.renderer == NULL) {
-        wlr_log(WLR_ERROR, "Cannot create renderer");
-        return 1;
-    }
-    wlr_renderer_init_wl_display(server.renderer, server.display);
-    server.allocator = wlr_allocator_autocreate(server.backend, server.renderer);
-    if (server.allocator == NULL) {
-        wlr_log(WLR_ERROR, "Cannot create allocator");
-        return 1;
-    }
-    server.compositor = wlr_compositor_create(server.display, 5, server.renderer);
-    server.subcompositor = wlr_subcompositor_create(server.display);
-    server.xwayland = wlr_xwayland_create(server.display, server.compositor, true);
-    wlr_data_device_manager_create(server.display);
-    server.output_layout = wlr_output_layout_create(server.display);
-    server.cursor = wlr_cursor_create();
-    wlr_cursor_attach_output_layout(server.cursor, server.output_layout);
-    server.scene = wlr_scene_create();
-    server.new_output.notify = server_new_output;
-    wl_signal_add(&server.backend->events.new_output, &server.new_output);
-    server.xdg_shell = wlr_xdg_shell_create(server.display, 3);
-    server.new_xdg_surface.notify = server_new_xdg_surface;
-    wl_signal_add(&server.xdg_shell->events.new_surface, &server.new_xdg_surface);
-    server.new_xwayland_surface.notify = server_new_xwayland_surface;
-    wl_signal_add(&server.xwayland->events.new_surface, &server.new_xwayland_surface);
-    server.seat = wlr_seat_create(server.display, "seat0");
-    wlr_xwayland_set_seat(server.xwayland, server.seat);
-    server.request_set_cursor.notify = request_set_cursor;
-    wl_signal_add(&server.seat->events.request_set_cursor, &server.request_set_cursor);
-    server.request_set_selection.notify = request_set_selection;
-    wl_signal_add(&server.seat->events.request_set_selection, &server.request_set_selection);
-    server.new_input.notify = server_new_input;
-    wl_signal_add(&server.backend->events.new_input, &server.new_input);
-    const char *socket = wl_display_add_socket_auto(server.display);
-    if (socket == NULL) {
-        wlr_log(WLR_ERROR, "Cannot add socket");
-        return 1;
-    }
-    if (!wlr_backend_start(server.backend)) {
-        wlr_log(WLR_ERROR, "Cannot start backend");
-        return 1;
-    }
-    setenv("WAYLAND_DISPLAY", socket, true);
-    if (server.xwayland) {
-        setenv("DISPLAY", server.xwayland->display_name, true);
-    }
-    server.child_pid = fork();
-    if (server.child_pid == 0) {
-        execvp(argv[1], argv + 1);
-        perror("execvp");
-        exit(1);
-    } else if (server.child_pid < 0) {
-        wlr_log(WLR_ERROR, "Cannot fork");
-        return 1;
-    }
-    wlr_log(WLR_INFO, "Running on WAYLAND_DISPLAY=%s", socket);
-    wl_display_run(server.display);
-    if (server.child_pid > 0) {
-        kill(server.child_pid, SIGTERM);
-        waitpid(server.child_pid, NULL, 0);
-    }
-    wl_display_destroy_clients(server.display);
-    wl_display_destroy(server.display);
-    wlr_scene_output_destroy(server.scene_output);
-    wlr_output_layout_destroy(server.output_layout);
-    wlr_allocator_destroy(server.allocator);
-    wlr_renderer_destroy(server.renderer);
-    wlr_backend_destroy(server.backend);
-    wlr_xwayland_destroy(server.xwayland);
-    return 0;
+
+wlr_log(WLR_INFO, "Exiting");
+
+return ret ? ret : app_ret;
 }
