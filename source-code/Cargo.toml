@@ -1,0 +1,17 @@
+[package]
+name = "gameframe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+smithay = { git = "https://github.com/Smithay/smithay", features = ["backend_drm", "backend_libinput", "backend_session_logind", "backend_udev", "renderer_glow", "desktop", "xwayland"] }
+calloop = "0.12"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+xkbcommon = "0.7"
+udev = "0.7"
+input = "0.8"
+drm = "0.11"
+gbm = "0.14"
+egl = "0.3"
+glow = "0.13"
