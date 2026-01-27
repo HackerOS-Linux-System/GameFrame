@@ -1,18 +1,4 @@
-// gcc
-// meson 
-// ninja-build
-// libwlroots-dev
-// libwayland-dev
-// libxkbcommon-dev
-// libgles2-mesa-dev 
-// libegl1-mesa-dev
-// libgbm-dev
-// libdrm-dev
-// libinput-dev 
-// libpixman-1-dev
-// libudev-dev 
-// pkg-config
+// cargo
 
 > cd source-code
-> meson setup build
-> ninja -C build
+> cargo build --release
