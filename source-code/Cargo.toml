@@ -18,3 +18,4 @@ x11rb = "0.12"
 glam = "0.24"
 libloading = "0.8"
 libseat = "0.2"
+rustix = { version = "0.38", features = ["fs"] }
