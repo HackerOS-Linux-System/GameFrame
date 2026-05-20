@@ -1,0 +1,13 @@
+[package]
+name    = "gameframe-overlay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+smithay   = { workspace = true }
+tiny-skia = { workspace = true }
+anyhow    = { workspace = true }
+tracing   = { workspace = true }
+serde     = { workspace = true }
+image     = { workspace = true }
