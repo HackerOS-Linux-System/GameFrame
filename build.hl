@@ -1,4 +1,3 @@
 // cargo
 
-> cd source-code
 > cargo build --release
