@@ -5,9 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-gameframe-gpu     = { path = "../gameframe-gpu" }
-gameframe-input   = { path = "../gameframe-input" }
-gameframe-overlay = { path = "../gameframe-overlay" }
+gameframe-gpu     = { path = "../gpu" }
+gameframe-input   = { path = "../input" }
+gameframe-overlay = { path = "../overlay" }
 
 smithay           = { workspace = true }
 
