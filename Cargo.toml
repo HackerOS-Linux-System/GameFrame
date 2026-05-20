@@ -1,0 +1,81 @@
+[workspace]
+resolver = "2"
+members = [
+    "source-code/gameframe-cli",
+    "source-code/gameframe-core",
+    "source-code/gameframe-gpu",
+    "source-code/gameframe-input",
+    "source-code/gameframe-overlay",
+]
+
+[workspace.package]
+version       = "0.3.0"
+edition       = "2021"
+license       = "Apache-2.0"
+authors       = ["HackerOS Team <hackeros068@gmail.com>"]
+repository    = "https://github.com/HackerOS-Linux-System/GameFrame/"
+rust-version  = "1.80"
+
+[workspace.dependencies]
+# Async / event loop
+tokio        = { version = "1", features = ["full"] }
+calloop      = { version = "0.14", features = ["executor"] }
+async-trait  = "0.1"
+
+# CLI
+clap = { version = "4", features = ["derive", "env", "color"] }
+
+# Smithay 0.7 – correct feature names
+# NOTE: renderer_gl (not renderer_gles – that feature was removed in 0.3)
+smithay = { version = "0.7", default-features = false, features = [
+    "backend_drm",
+    "backend_gbm",
+    "backend_egl",
+    "backend_udev",
+    "backend_libinput",
+    "backend_session",
+    "backend_session_libseat",
+    "backend_vulkan",
+    "desktop",
+    "renderer_gl",
+    "renderer_pixman",
+    "renderer_multi",
+    "wayland_frontend",
+    "xwayland",
+    "x11rb_event_source",
+    "use_system_lib",
+] }
+# smithay-drm-extras is declared per-crate (not in workspace)
+
+# DRM / GBM
+drm       = "0.14"
+drm-fourcc = "2"
+gbm       = { version = "0.18", features = ["drm-support"] }
+nix       = { version = "0.29", features = ["fs", "ioctl", "ucontext", "event"] }
+
+# Rendering – tiny-skia for overlay, image for cursor loading
+tiny-skia  = "0.11"
+image      = { version = "0.25", default-features = false, features = ["png"] }
+
+# XKB / input
+xkbcommon = { version = "0.7", features = ["wayland"] }
+input     = { version = "0.9", default-features = false, features = ["libinput_1_19"] }
+
+# Logging
+tracing             = { version = "0.1", features = ["max_level_trace", "release_max_level_info"] }
+tracing-subscriber  = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Config / serialization
+serde       = { version = "1", features = ["derive"] }
+toml        = "0.8"
+directories = "5"
+
+# Error handling
+anyhow    = "1"
+thiserror = "1"
+
+# Misc
+uuid      = { version = "1", features = ["v4"] }
+bitflags  = "2"
+libc      = "0.2"
+# rustix: used via smithay::reexports::rustix (avoids version conflict)
