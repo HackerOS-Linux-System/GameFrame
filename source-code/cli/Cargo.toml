@@ -9,8 +9,8 @@ name = "gameframe"
 path = "src/main.rs"
 
 [dependencies]
-gameframe-core = { path = "../gameframe-core" }
-gameframe-gpu  = { path = "../gameframe-gpu" }
+gameframe-core = { path = "../core" }
+gameframe-gpu  = { path = "../gpu" }
 clap              = { workspace = true }
 tokio             = { workspace = true }
 tracing           = { workspace = true }
