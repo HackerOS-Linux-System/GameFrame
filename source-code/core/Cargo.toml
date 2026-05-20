@@ -1,0 +1,25 @@
+[package]
+name    = "gameframe-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gameframe-gpu     = { path = "../gameframe-gpu" }
+gameframe-input   = { path = "../gameframe-input" }
+gameframe-overlay = { path = "../gameframe-overlay" }
+
+smithay           = { workspace = true }
+
+calloop           = { workspace = true }
+tokio             = { workspace = true }
+anyhow            = { workspace = true }
+thiserror         = { workspace = true }
+tracing           = { workspace = true }
+serde             = { workspace = true }
+toml              = { workspace = true }
+libc              = { workspace = true }
+drm               = { workspace = true }
+drm-fourcc        = { workspace = true }
+gbm               = { workspace = true }
+tiny-skia         = { workspace = true }
