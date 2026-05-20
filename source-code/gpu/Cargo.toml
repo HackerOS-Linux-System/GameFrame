@@ -1,0 +1,16 @@
+[package]
+name    = "gameframe-gpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+drm        = { workspace = true }
+drm-fourcc = { workspace = true }
+gbm        = { workspace = true }
+nix        = { workspace = true }
+anyhow     = { workspace = true }
+thiserror  = { workspace = true }
+tracing    = { workspace = true }
+serde      = { workspace = true }
+libc       = { workspace = true }
