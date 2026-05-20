@@ -1,0 +1,15 @@
+[package]
+name    = "gameframe-input"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+smithay   = { workspace = true }
+anyhow    = { workspace = true }
+thiserror = { workspace = true }
+tracing   = { workspace = true }
+tokio     = { workspace = true }
+xkbcommon = { workspace = true }
+serde     = { workspace = true }
+bitflags  = { workspace = true }
