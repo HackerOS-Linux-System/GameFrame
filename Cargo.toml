@@ -1,11 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
-    "source-code/gameframe-cli",
-    "source-code/gameframe-core",
-    "source-code/gameframe-gpu",
-    "source-code/gameframe-input",
-    "source-code/gameframe-overlay",
+    "source-code/cli",
+    "source-code/core",
+    "source-code/gpu",
+    "source-code/input",
+    "source-code/overlay",
 ]
 
 [workspace.package]
