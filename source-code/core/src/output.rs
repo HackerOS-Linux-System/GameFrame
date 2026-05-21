@@ -3,7 +3,7 @@ use anyhow::Result;
 use drm::control::{connector, crtc, Device as ControlDevice, Mode};
 use smithay::{
     backend::{
-        allocator::gbm::{GbmAllocator},
+        allocator::gbm::GbmAllocator,
         drm::{DrmDevice, DrmDeviceFd},
         renderer::{damage::OutputDamageTracker, gles::GlesRenderer},
     },
@@ -26,15 +26,12 @@ pub struct OutputManager {
 }
 
 impl OutputManager {
-    pub fn new() -> Self {
-        Self { outputs: HashMap::new() }
-    }
+    pub fn new() -> Self { Self { outputs: HashMap::new() } }
 
     #[allow(clippy::too_many_arguments)]
     pub fn add_output(
         &mut self,
         drm: &mut DrmDevice,
-        // These will be used when wiring DrmCompositor per-output
         _allocator: GbmAllocator<DrmDeviceFd>,
         _renderer:  &mut GlesRenderer,
         display_handle: &DisplayHandle,
@@ -44,7 +41,7 @@ impl OutputManager {
         scale:     f64,
         vrr:       bool,
     ) -> Result<()> {
-        let connector_info = drm.get_connector(connector, true)?;
+        let connector_info   = drm.get_connector(connector, true)?;
         let (phys_w, phys_h) = connector_info.size().unwrap_or((0, 0));
         let (pix_w, pix_h)   = (mode.size().0 as i32, mode.size().1 as i32);
 
@@ -65,22 +62,8 @@ impl OutputManager {
         output.create_global::<crate::state::GameframeState>(display_handle);
         output.add_mode(wl_mode);
         output.set_preferred(wl_mode);
-
-        // Set mode + transform
-        output.change_current_state(
-            Some(wl_mode),
-            Some(Transform::Normal),
-            None,
-            Some((0, 0).into()),
-        );
-
-        // Smithay 0.7: scale is set via change_current_state with Scale enum
-        output.change_current_state(
-            None,
-            None,
-            Some(Scale::Fractional(scale)),
-            None,
-        );
+        output.change_current_state(Some(wl_mode), Some(Transform::Normal), None, Some((0, 0).into()));
+        output.change_current_state(None, None, Some(Scale::Fractional(scale)), None);
 
         let damage_tracker = OutputDamageTracker::from_output(&output);
 
@@ -92,14 +75,7 @@ impl OutputManager {
             "Output configured"
         );
 
-        self.outputs.insert(crtc, GameframeOutput {
-            output,
-            crtc,
-            connector,
-            mode,
-            damage_tracker,
-        });
-
+        self.outputs.insert(crtc, GameframeOutput { output, crtc, connector, mode, damage_tracker });
         Ok(())
     }
 
@@ -112,8 +88,10 @@ impl OutputManager {
     pub fn outputs_mut(&mut self) -> impl Iterator<Item = &mut GameframeOutput> {
         self.outputs.values_mut()
     }
+
+    pub fn primary_output(&self) -> Option<&Output> {
+        self.outputs.values().next().map(|o| &o.output)
+    }
 }
 
-impl Default for OutputManager {
-    fn default() -> Self { Self::new() }
-}
+impl Default for OutputManager { fn default() -> Self { Self::new() } }
