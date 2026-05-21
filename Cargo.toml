@@ -1,11 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
-    "cli",
-    "core",
-    "gpu",
-    "input",
-    "overlay",
+    "source-code/cli",
+    "source-code/core",
+    "source-code/gpu",
+    "source-code/input",
+    "source-code/overlay",
 ]
 
 [workspace.package]
