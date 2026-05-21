@@ -18,10 +18,9 @@ pub async fn run_session(opts: SessionOptions) -> Result<()> {
         hdr      = opts.config.display.hdr,
         vrr      = opts.config.display.vrr,
         xwayland = opts.config.session.xwayland,
-        "Starting Gameframe session"
+        "Starting Gameframe session v0.4"
     );
 
-    // Pre-flight GPU checks
     match gameframe_gpu::detect_primary() {
         Ok(Some(gpu)) => {
             info!(name = %gpu.name, vendor = %gpu.vendor, driver = %gpu.driver, "Primary GPU");
@@ -54,7 +53,6 @@ pub async fn stop_session() -> Result<()> {
     let lock = lock_path();
     if lock.exists() {
         let pid: i32 = std::fs::read_to_string(&lock)?.trim().parse()?;
-        // SAFETY: kill with SIGTERM is always safe to call
         unsafe { libc::kill(pid, libc::SIGTERM); }
         info!(pid, "Sent SIGTERM to session");
         std::fs::remove_file(lock).ok();
@@ -68,7 +66,7 @@ pub async fn print_status() -> Result<()> {
     let lock = lock_path();
     if lock.exists() {
         let pid = std::fs::read_to_string(&lock)?;
-        println!("Gameframe running (PID {})", pid.trim());
+        println!("Gameframe v0.4 running (PID {})", pid.trim());
         if let Ok(Some(gpu)) = gameframe_gpu::detect_primary() {
             println!("  GPU: {} [{}]", gpu.name, gpu.driver);
         }
